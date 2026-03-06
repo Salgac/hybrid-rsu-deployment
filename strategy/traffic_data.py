@@ -35,6 +35,30 @@ def _congestion_intensity(rgb):
     return r - g
 
 
+def _interval_key(start_time, end_time):
+    return start_time.strftime("%Y%m%d_%H%M") + "_" + end_time.strftime("%H%M")
+
+
+CACHE_DIR = "cache"
+
+
+def _ensure_cache_dir():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def _save_raster(raster, key):
+    _ensure_cache_dir()
+    path = f"{CACHE_DIR}/traffic_raster_{key}.npy"
+    np.save(path, raster)
+
+
+def _load_raster(key):
+    path = f"{CACHE_DIR}/traffic_raster_{key}.npy"
+    if os.path.exists(path):
+        return np.load(path)
+    return None
+
+
 # =========================================================
 # STREAMING aggregation
 # =========================================================
@@ -46,6 +70,14 @@ def build_traffic_raster(folder, start_time, end_time, step=4):
     step reduces resolution to speed up computation.
     """
 
+    # check cache first
+    key = _interval_key(start_time, end_time)
+    raster = _load_raster(key)
+    if raster is not None:
+        print("Loaded cached traffic raster")
+        return raster
+
+    # find relevant images
     paths = sorted(glob.glob(os.path.join(folder, "*.png")))
 
     paths = [p for p in paths if start_time <= _parse_timestamp(p) <= end_time]
@@ -97,6 +129,9 @@ def build_traffic_raster(folder, start_time, end_time, step=4):
     # normalize
     if raster.max() > 0:
         raster = raster / raster.max()
+
+    # cache result
+    _save_raster(raster, key)
 
     return raster
 
