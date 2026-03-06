@@ -1,0 +1,4 @@
+Timestamp,VehicleID,VehicleType,Line,Latitude,Longitude,DelayMinutes,Destination,IsOnStop,OperatorName,Tooltip
+2025-01-31T00:01:00,802963809,BUS,N34,48.19429,17.0289,0,"Bratislava, Hlavná stanica",False,Dopravný podnik Bratislava,"Bratislava, Pri kríži → Bratislava, Hlavná stanica"
+2025-01-31T00:01:00,802947748,TROLLEY,40,48.15658,17.11388,2,"Bratislava, Karpatská",False,Dopravný podnik Bratislava,"Bratislava, Hlavná stanica → Bratislava, Karpatská"
+2025-01-31T00:01:00,802943716,TRAM,1,48.15822,17.12801,0,"Bratislava, Úrad vlády SR",False,Dopravný podnik Bratislava,"Bratislava, Hlavná stanica → Bratislava, Úrad vlády SR"
