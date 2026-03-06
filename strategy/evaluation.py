@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
+import math
 
 
 # =========================================================
-# INTERNAL: distance calculation (meters)
+# INTERNAL: distance helper
 # =========================================================
 
 
@@ -29,11 +30,13 @@ def node_coverage_ratio(G, rsu_nodes, radius_m):
 
     for node in G.nodes():
 
-        lat2, lon2 = G.nodes[node]["y"], G.nodes[node]["x"]
+        lat2 = G.nodes[node]["y"]
+        lon2 = G.nodes[node]["x"]
 
         for rsu in rsu_nodes:
 
-            lat1, lon1 = G.nodes[rsu]["y"], G.nodes[rsu]["x"]
+            lat1 = G.nodes[rsu]["y"]
+            lon1 = G.nodes[rsu]["x"]
 
             if _distance_meters(lat1, lon1, lat2, lon2) <= radius_m:
                 covered.add(node)
@@ -57,11 +60,13 @@ def road_coverage_ratio(G, rsu_nodes, radius_m):
         length = data.get("length", 0)
         total_length += length
 
-        lat2, lon2 = G.nodes[u]["y"], G.nodes[u]["x"]
+        lat2 = G.nodes[u]["y"]
+        lon2 = G.nodes[u]["x"]
 
         for rsu in rsu_nodes:
 
-            lat1, lon1 = G.nodes[rsu]["y"], G.nodes[rsu]["x"]
+            lat1 = G.nodes[rsu]["y"]
+            lon1 = G.nodes[rsu]["x"]
 
             if _distance_meters(lat1, lon1, lat2, lon2) <= radius_m:
                 covered_length += length
@@ -74,7 +79,43 @@ def road_coverage_ratio(G, rsu_nodes, radius_m):
 
 
 # =========================================================
-# AVERAGE DISTANCE TO RSU
+# TRAFFIC COVERAGE (using weighted graph)
+# =========================================================
+
+
+def traffic_coverage_graph(G, rsu_nodes, radius_m):
+
+    total_demand = 0
+    covered_demand = 0
+
+    for u, v, data in G.edges(data=True):
+
+        weight = data.get("congestion", 0)
+        length = data.get("length", 0)
+
+        demand = weight * length
+        total_demand += demand
+
+        lat2 = G.nodes[u]["y"]
+        lon2 = G.nodes[u]["x"]
+
+        for rsu in rsu_nodes:
+
+            lat1 = G.nodes[rsu]["y"]
+            lon1 = G.nodes[rsu]["x"]
+
+            if _distance_meters(lat1, lon1, lat2, lon2) <= radius_m:
+                covered_demand += demand
+                break
+
+    if total_demand == 0:
+        return 0
+
+    return covered_demand / total_demand
+
+
+# =========================================================
+# AVERAGE DISTANCE TO NEAREST RSU
 # =========================================================
 
 
@@ -84,13 +125,15 @@ def avg_distance_to_rsu(G, rsu_nodes):
 
     for node in G.nodes():
 
-        lat2, lon2 = G.nodes[node]["y"], G.nodes[node]["x"]
+        lat2 = G.nodes[node]["y"]
+        lon2 = G.nodes[node]["x"]
 
         best = float("inf")
 
         for rsu in rsu_nodes:
 
-            lat1, lon1 = G.nodes[rsu]["y"], G.nodes[rsu]["x"]
+            lat1 = G.nodes[rsu]["y"]
+            lon1 = G.nodes[rsu]["x"]
 
             dist = _distance_meters(lat1, lon1, lat2, lon2)
 
@@ -103,7 +146,7 @@ def avg_distance_to_rsu(G, rsu_nodes):
 
 
 # =========================================================
-# REDUNDANT COVERAGE
+# REDUNDANCY
 # =========================================================
 
 
@@ -113,13 +156,15 @@ def redundancy_ratio(G, rsu_nodes, radius_m):
 
     for node in G.nodes():
 
-        lat2, lon2 = G.nodes[node]["y"], G.nodes[node]["x"]
+        lat2 = G.nodes[node]["y"]
+        lon2 = G.nodes[node]["x"]
 
         count = 0
 
         for rsu in rsu_nodes:
 
-            lat1, lon1 = G.nodes[rsu]["y"], G.nodes[rsu]["x"]
+            lat1 = G.nodes[rsu]["y"]
+            lon1 = G.nodes[rsu]["x"]
 
             if _distance_meters(lat1, lon1, lat2, lon2) <= radius_m:
                 count += 1
@@ -130,103 +175,12 @@ def redundancy_ratio(G, rsu_nodes, radius_m):
     return redundant / len(G.nodes())
 
 
-# ---------------------------------------------------------
-# Helper: pixel → geographic coordinate
-# ---------------------------------------------------------
-
-
-def _pixel_to_geo(x, y, bounds, width, height):
-
-    (lat_min, lng_min), (lat_max, lng_max) = bounds
-
-    lat = lat_max - (y / height) * (lat_max - lat_min)
-    lng = lng_min + (x / width) * (lng_max - lng_min)
-
-    return lat, lng
-
-
-# ---------------------------------------------------------
-# Helper: traffic intensity
-# ---------------------------------------------------------
-
-
-def _traffic_intensity(rgb, baseline=(150, 255, 200)):
-    baseline = np.array(baseline)
-    return np.linalg.norm(rgb - baseline)
-
-
-# ---------------------------------------------------------
-# TRAFFIC COVERAGE USING TRAFFIC MAP
-# ---------------------------------------------------------
-
-
-def traffic_map_coverage(
-    G,
-    rsu_nodes,
-    raster_image,
-    bounds,
-    radius_m,
-):
-
-    raster = np.array(raster_image)
-
-    height, width = raster.shape[:2]
-
-    total_traffic = 0
-    covered_traffic = 0
-
-    for y in range(height):
-
-        for x in range(width):
-
-            rgb = raster[y, x, :3]
-            alpha = raster[y, x, 3]
-
-            if alpha == 0:
-                continue
-
-            intensity = _traffic_intensity(rgb)
-
-            if intensity <= 0:
-                continue
-
-            total_traffic += intensity
-
-            lat, lon = _pixel_to_geo(x, y, bounds, width, height)
-
-            for rsu in rsu_nodes:
-
-                lat1, lon1 = G.nodes[rsu]["y"], G.nodes[rsu]["x"]
-
-                meter_per_deg_lat = 111320
-                meter_per_deg_lon = 111320 * np.cos(np.radians(lat1))
-
-                dx = (lon1 - lon) * meter_per_deg_lon
-                dy = (lat1 - lat) * meter_per_deg_lat
-
-                if np.sqrt(dx**2 + dy**2) <= radius_m:
-
-                    covered_traffic += intensity
-                    break
-
-    if total_traffic == 0:
-        return 0
-
-    return covered_traffic / total_traffic
-
-
 # =========================================================
 # MAIN EVALUATION FUNCTION
 # =========================================================
 
 
-def evaluate_deployment(
-    G,
-    rsu_nodes,
-    radius_m,
-    raster_image=None,
-    bounds=None,
-):
+def evaluate_deployment(G, rsu_nodes, radius_m):
 
     results = {}
 
@@ -236,47 +190,34 @@ def evaluate_deployment(
 
     results["road_coverage"] = road_coverage_ratio(G, rsu_nodes, radius_m)
 
+    results["traffic_coverage"] = traffic_coverage_graph(G, rsu_nodes, radius_m)
+
     results["avg_distance_to_rsu"] = avg_distance_to_rsu(G, rsu_nodes)
 
     results["redundancy"] = redundancy_ratio(G, rsu_nodes, radius_m)
-
-    if raster_image is not None and bounds is not None:
-
-        results["traffic_coverage"] = traffic_map_coverage(
-            G,
-            rsu_nodes,
-            raster_image,
-            bounds,
-            radius_m,
-        )
 
     return results
 
 
 # =========================================================
-# TABLE BUILDER FOR MULTIPLE STRATEGIES
+# BUILD COMPARISON TABLE
 # =========================================================
 
 
-def build_comparison_table(G, deployments, radius_m, raster_image=None, bounds=None):
-    """
-    deployments: dict
-        {
-            "strategy_name": [node_list],
-            "strategy2": [node_list]
-        }
-    """
+def build_comparison_table(G, deployments, radius_m):
 
     rows = []
 
-    for name, rsu_nodes in deployments.items():
+    for strategy_name, rsu_nodes in deployments.items():
 
-        metrics = evaluate_deployment(G, rsu_nodes, radius_m, raster_image, bounds)
+        metrics = evaluate_deployment(G, rsu_nodes, radius_m)
 
-        metrics["strategy"] = name
+        metrics["strategy"] = strategy_name
 
         rows.append(metrics)
 
     df = pd.DataFrame(rows)
 
-    return df
+    cols = ["strategy"] + [c for c in df.columns if c != "strategy"]
+
+    return df[cols]
