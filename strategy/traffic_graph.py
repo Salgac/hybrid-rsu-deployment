@@ -29,66 +29,42 @@ def _calculate_bounds(center_lat, center_lng, zoom, width, height):
     return bounds
 
 
-# =========================================================
-# INTERNAL: Geo → Pixel
-# =========================================================
-
-
-def _geo_to_pixel(lat, lng, bounds, width, height):
-    (lat_min, lng_min), (lat_max, lng_max) = bounds
-
-    x = int((lng - lng_min) / (lng_max - lng_min) * width)
-    y = int((lat_max - lat) / (lat_max - lat_min) * height)
-
-    return x, y
-
-
-# =========================================================
-# INTERNAL: RGB → congestion intensity
-# =========================================================
-
-
-def _rgb_to_intensity(rgb, baseline=(150, 255, 200)):
-    baseline = np.array(baseline)
-    return np.linalg.norm(rgb - baseline)
-
-
-# =========================================================
-# MAIN: Add congestion weights to graph
-# =========================================================
-
-
 def add_congestion_to_graph(
     graph,
     raster_image,
     center_lat,
     center_lng,
     zoom,
-    width,
-    height,
     normalize=True,
 ):
     """
-    Adds congestion weight [0,1] to graph edges.
-
-    Parameters:
-    - graph: networkx graph with WGS84 geometries
-    - raster_image: PIL image or numpy array (RGBA)
-    - center_lat, center_lng: center used to fetch raster
-    - zoom: zoom level used to fetch raster
-    - width, height: raster pixel size
+    Adds congestion weight [0,1] to graph edges using traffic raster.
+    Parameters
+    ----------
+    graph : networkx graph
+        Graph with WGS84 geometries (LineString edges)
+    raster_image : numpy array
+        Traffic raster (congestion intensity values)
+    center_lat, center_lng : float
+        Center used to generate the raster
+    zoom : int
+        Map zoom level
+    normalize : bool
+        Whether to normalize congestion values
     """
 
-    if not isinstance(raster_image, np.ndarray):
-        raster = np.array(raster_image)
-    else:
-        raster = raster_image
+    # Ensure numpy raster
+    raster = np.array(raster_image)
 
-    bounds = _calculate_bounds(center_lat, center_lng, zoom, width, height)
+    height, width = raster.shape
+    # MapQuest tile size (original)
+    MAP_WIDTH = 2304
+    MAP_HEIGHT = 2304
 
-    h, w = raster.shape[:2]
+    bounds = _calculate_bounds(center_lat, center_lng, zoom, MAP_WIDTH, MAP_HEIGHT)
 
     G = graph.copy()
+
     raw_values = []
 
     for u, v, key, data in G.edges(keys=True, data=True):
@@ -99,37 +75,57 @@ def add_congestion_to_graph(
             G[u][v][key]["congestion"] = 0
             continue
 
-        coords = list(geom.coords)
         intensities = []
 
-        for lon, lat in coords:
-            x, y = _geo_to_pixel(lat, lon, bounds, w, h)
+        # sample multiple points along the edge
+        num_samples = max(8, int(geom.length / 15))
 
-            if 0 <= x < w and 0 <= y < h:
-                pixel = raster[y, x]
-                rgb = pixel[:3]
-                alpha = pixel[3]
+        for i in range(num_samples):
 
-                if alpha > 0:
-                    intensities.append(_rgb_to_intensity(rgb))
+            point = geom.interpolate(i / (num_samples - 1), normalized=True)
+            lon, lat = point.x, point.y
+
+            # convert to original pixel coordinate
+            x_full = (lon - bounds[0][1]) / (bounds[1][1] - bounds[0][1]) * MAP_WIDTH
+            y_full = (bounds[1][0] - lat) / (bounds[1][0] - bounds[0][0]) * MAP_HEIGHT
+
+            # map to downsampled raster
+            x = int(x_full * width / MAP_WIDTH)
+            y = int(y_full * height / MAP_HEIGHT)
+
+            if 0 <= x < width and 0 <= y < height:
+                value = raster[y, x]
+
+                if value > 0:
+                    intensities.append(value)
 
         mean_intensity = float(np.mean(intensities)) if intensities else 0.0
 
         G[u][v][key]["raw_congestion"] = mean_intensity
         raw_values.append(mean_intensity)
 
-    # Normalize to [0,1]
+    # Normalize congestion weights
     if normalize and raw_values:
+
         max_val = max(raw_values)
+
         if max_val > 0:
+
             for u, v, key in G.edges(keys=True):
+
                 raw = G[u][v][key].get("raw_congestion", 0.0)
+
                 G[u][v][key]["congestion"] = raw / max_val
+
         else:
+
             for u, v, key in G.edges(keys=True):
                 G[u][v][key]["congestion"] = 0.0
+
     else:
+
         for u, v, key in G.edges(keys=True):
+
             G[u][v][key]["congestion"] = G[u][v][key].get("raw_congestion", 0.0)
 
     return G

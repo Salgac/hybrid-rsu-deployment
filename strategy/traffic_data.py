@@ -1,141 +1,137 @@
 import os
 import glob
-import math
-from datetime import datetime
 import numpy as np
 from PIL import Image
+from datetime import datetime
 import folium
 from folium.raster_layers import ImageOverlay
+import math
 
 
-# ---------------------------------------------------------
-# Helper: Parse timestamp from filename
-# Expected format: YYYYMMDDhhmm_traffic.png
-# ---------------------------------------------------------
+# =========================================================
+# Parse timestamp from filename
+# =========================================================
 
 
-def _parse_timestamp_from_filename(filename):
-    basename = os.path.basename(filename)
-    timestamp_str = basename.split("_")[0]
-    return datetime.strptime(timestamp_str, "%Y%m%d%H%M")
+def _parse_timestamp(path):
+    name = os.path.basename(path)
+    ts = name.split("_")[0]
+    return datetime.strptime(ts, "%Y%m%d%H%M")
 
 
-# ---------------------------------------------------------
-# 1. Load traffic images within time interval
-# ---------------------------------------------------------
+# =========================================================
+# Identify congestion pixels (ignore green)
+# =========================================================
 
 
-def load_traffic_images_in_interval(
-    folder,
-    start_time: datetime,
-    end_time: datetime,
-):
-    image_paths = sorted(glob.glob(os.path.join(folder, "*.png")))
+def _congestion_intensity(rgb):
+    r, g, b = rgb
 
-    selected_images = []
+    # ignore free-flow green/cyan roads
+    if g > r:
+        return 0
 
-    for path in image_paths:
-        try:
-            timestamp = _parse_timestamp_from_filename(path)
-
-            if start_time <= timestamp <= end_time:
-                img = Image.open(path).convert("RGBA")
-                selected_images.append(np.array(img))
-
-        except Exception:
-            continue
-
-    if not selected_images:
-        raise ValueError("No traffic images found in the specified time interval.")
-
-    print(f"Loaded {len(selected_images)} traffic images in selected interval.")
-    return selected_images
+    # congestion intensity
+    return r - g
 
 
-# ---------------------------------------------------------
-# 2. Aggregate Images (Preserve Colors)
-# ---------------------------------------------------------
+# =========================================================
+# STREAMING aggregation
+# =========================================================
 
 
-def aggregate_traffic_images(images):
-    stack = np.stack(images, axis=0)
+def build_traffic_raster(folder, start_time, end_time, step=4):
+    """
+    Builds congestion raster using streaming approach.
+    step reduces resolution to speed up computation.
+    """
 
-    rgb = stack[:, :, :, :3]
-    alpha = stack[:, :, :, 3]
+    paths = sorted(glob.glob(os.path.join(folder, "*.png")))
 
-    mask = alpha > 0
+    paths = [p for p in paths if start_time <= _parse_timestamp(p) <= end_time]
 
-    count = np.maximum(mask.sum(axis=0), 1)
-    summed = (rgb * mask[..., None]).sum(axis=0)
+    if not paths:
+        raise ValueError("No traffic images in interval")
 
-    avg_rgb = summed / count[..., None]
-    avg_alpha = (mask.sum(axis=0) > 0).astype(np.uint8) * 255
+    print("Processing", len(paths), "images")
 
-    result = np.dstack([avg_rgb.astype(np.uint8), avg_alpha])
+    # load first image to determine shape
+    first = np.array(Image.open(paths[0]).convert("RGBA"))
 
-    return Image.fromarray(result, mode="RGBA")
+    height, width = first.shape[:2]
+
+    height //= step
+    width //= step
+
+    accumulator = np.zeros((height, width), dtype=np.float32)
+    counts = np.zeros((height, width), dtype=np.int32)
+
+    for path in paths:
+
+        img = np.array(Image.open(path).convert("RGBA"))
+
+        for y in range(0, img.shape[0], step):
+            for x in range(0, img.shape[1], step):
+
+                rgb = img[y, x, :3]
+                alpha = img[y, x, 3]
+
+                if alpha == 0:
+                    continue
+
+                intensity = _congestion_intensity(rgb)
+
+                if intensity <= 0:
+                    continue
+
+                iy = y // step
+                ix = x // step
+
+                accumulator[iy, ix] += intensity
+                counts[iy, ix] += 1
+
+    counts[counts == 0] = 1
+
+    raster = accumulator / counts
+
+    # normalize
+    if raster.max() > 0:
+        raster = raster / raster.max()
+
+    return raster
 
 
-# ---------------------------------------------------------
-# 3. Compute geographic bounds
-# ---------------------------------------------------------
+# =========================================================
+# Map bounds
+# =========================================================
 
 
-def calculate_image_bounds(center_lat, center_lng, zoom, width, height):
-    scale_factor = 104300 / (2**zoom)
+def calculate_bounds(lat, lng, zoom, width, height):
 
-    lat_span = (height * scale_factor) / 111320
-    lng_span = (width * scale_factor) / (
-        111320 * abs(math.cos(math.radians(center_lat)))
-    )
+    scale = 104300 / (2**zoom)
 
-    bounds = [
-        [center_lat - lat_span / 2, center_lng - lng_span / 2],
-        [center_lat + lat_span / 2, center_lng + lng_span / 2],
+    lat_span = (height * scale) / 111320
+    lng_span = (width * scale) / (111320 * abs(math.cos(math.radians(lat))))
+
+    return [
+        [lat - lat_span / 2, lng - lng_span / 2],
+        [lat + lat_span / 2, lng + lng_span / 2],
     ]
 
-    return bounds
+
+# =========================================================
+# Visualization
+# =========================================================
 
 
-# ---------------------------------------------------------
-# 4. Build aggregated traffic raster
-# ---------------------------------------------------------
+def visualize_traffic_raster(raster, center_lat, center_lng, zoom, width, height):
 
-
-def build_traffic_raster(
-    folder,
-    start_time: datetime,
-    end_time: datetime,
-):
-    images = load_traffic_images_in_interval(folder, start_time, end_time)
-    aggregated_image = aggregate_traffic_images(images)
-    return aggregated_image
-
-
-# ---------------------------------------------------------
-# 5. Display function (Folium overlay)
-# ---------------------------------------------------------
-
-
-def visualize_traffic_raster(
-    aggregated_image,
-    center_lat,
-    center_lng,
-    zoom,
-    width,
-    height,
-    opacity=0.85,
-):
-    bounds = calculate_image_bounds(center_lat, center_lng, zoom, width, height)
+    bounds = calculate_bounds(center_lat, center_lng, zoom, width, height)
 
     m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom)
 
     ImageOverlay(
-        image=np.array(aggregated_image),
-        bounds=bounds,
-        opacity=opacity,
-        interactive=False,
-        cross_origin=False,
+        image=raster, bounds=bounds, opacity=0.7, colormap=lambda x: (1, 0, 0, x)
     ).add_to(m)
 
     return m
