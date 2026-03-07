@@ -1,95 +1,63 @@
+from scipy.spatial import cKDTree
 import numpy as np
 import pandas as pd
-import networkx as nx
 
 
-# ---------------------------------------------------------
-# distance helper
-# ---------------------------------------------------------
+# =========================================================
+# build KD-tree for graph nodes
+# =========================================================
 
 
-def _distance_m(lat1, lon1, lat2, lon2):
+def build_node_kdtree(G):
 
-    meter_per_deg_lat = 111320
-    meter_per_deg_lon = 111320 * np.cos(np.radians((lat1 + lat2) / 2))
+    nodes = list(G.nodes())
 
-    dx = (lon1 - lon2) * meter_per_deg_lon
-    dy = (lat1 - lat2) * meter_per_deg_lat
+    coords = np.array([(G.nodes[n]["y"], G.nodes[n]["x"]) for n in nodes])
 
-    return np.sqrt(dx**2 + dy**2)
+    tree = cKDTree(coords)
 
-
-# ---------------------------------------------------------
-# snap coordinate to nearest node
-# ---------------------------------------------------------
+    return nodes, coords, tree
 
 
-def nearest_node(G, lat, lon):
-
-    best_node = None
-    best_dist = float("inf")
-
-    for node in G.nodes():
-
-        lat2 = G.nodes[node]["y"]
-        lon2 = G.nodes[node]["x"]
-
-        d = _distance_m(lat, lon, lat2, lon2)
-
-        if d < best_dist:
-            best_node = node
-            best_dist = d
-
-    return best_node
+# =========================================================
+# nearest node using KD-tree
+# =========================================================
 
 
-# ---------------------------------------------------------
-# vehicle density on nodes
-# ---------------------------------------------------------
+def nearest_node_kdtree(nodes, tree, lat, lon):
+
+    dist, idx = tree.query([lat, lon])
+
+    return nodes[idx]
 
 
-def vehicle_node_density(G, vehicle_df):
-
-    visit_counts = {}
-
-    for _, row in vehicle_df.iterrows():
-
-        lat = row["Latitude"]
-        lon = row["Longitude"]
-
-        node = nearest_node(G, lat, lon)
-
-        visit_counts[node] = visit_counts.get(node, 0) + 1
-
-    return visit_counts
+# =========================================================
+# node coverage using KD-tree
+# =========================================================
 
 
-# ---------------------------------------------------------
-# node coverage
-# ---------------------------------------------------------
+def node_coverage_kdtree(nodes, coords, tree, node_idx, radius_deg):
+
+    center = coords[node_idx]
+
+    idxs = tree.query_ball_point(center, radius_deg)
+
+    return {nodes[i] for i in idxs}
 
 
-def node_coverage(G, node, radius):
-
-    lat = G.nodes[node]["y"]
-    lon = G.nodes[node]["x"]
-
-    covered = set()
-
-    for n in G.nodes():
-
-        lat2 = G.nodes[n]["y"]
-        lon2 = G.nodes[n]["x"]
-
-        if _distance_m(lat, lon, lat2, lon2) <= radius:
-            covered.add(n)
-
-    return covered
+# =========================================================
+# convert meters → degrees (approx)
+# =========================================================
 
 
-# ---------------------------------------------------------
+def meters_to_degrees(radius_m):
+
+    return radius_m / 111320.0
+
+
+# =========================================================
 # compute node demand from congestion
-# ---------------------------------------------------------
+# =========================================================
 
 
 def compute_node_demand(G):
@@ -102,31 +70,53 @@ def compute_node_demand(G):
 
         demand[node] = float(np.mean(weights)) if weights else 0
 
-    nx.set_node_attributes(G, demand, "demand")
-
     return demand
 
 
-# ---------------------------------------------------------
-# Hybrid RSU deployment (node-based)
-# ---------------------------------------------------------
+# =========================================================
+# vehicle density → mobile RSU candidates
+# =========================================================
+
+
+def vehicle_node_density(G, vehicle_df, nodes, tree):
+
+    visits = {}
+
+    for _, row in vehicle_df.iterrows():
+
+        lat = row["Latitude"]
+        lon = row["Longitude"]
+
+        node = nearest_node_kdtree(nodes, tree, lat, lon)
+
+        visits[node] = visits.get(node, 0) + 1
+
+    ranked = sorted(visits.items(), key=lambda x: x[1], reverse=True)
+
+    return [n for n, _ in ranked]
+
+
+# =========================================================
+# Hybrid RSU deployment (KD-tree optimized)
+# =========================================================
 
 
 def hybrid_rsu_deployment(
-    G, vehicle_df, total_rsu_budget=20, srsu_radius=300, mrsu_radius=300, theta=0.2
+    G, vehicle_df, total_rsu_budget=20, srsu_radius=300, mrsu_radius=500, theta=0.2
 ):
 
-    compute_node_demand(G)
+    nodes, coords, tree = build_node_kdtree(G)
 
-    # candidate static nodes
-    H = [n for n in G.nodes() if G.nodes[n]["demand"] >= theta]
+    node_index = {n: i for i, n in enumerate(nodes)}
 
-    # vehicle density hotspots
-    visit_counts = vehicle_node_density(G, vehicle_df)
+    demand = compute_node_demand(G)
 
-    ranked_mobile_nodes = sorted(visit_counts.items(), key=lambda x: x[1], reverse=True)
+    H = [n for n in nodes if demand.get(n, 0) >= theta]
 
-    ranked_mobile_nodes = [n for n, _ in ranked_mobile_nodes]
+    ranked_mobile_nodes = vehicle_node_density(G, vehicle_df, nodes, tree)
+
+    radius_s = meters_to_degrees(srsu_radius)
+    radius_m = meters_to_degrees(mrsu_radius)
 
     S_static = []
     M_mobile = []
@@ -135,7 +125,6 @@ def hybrid_rsu_deployment(
 
     while len(S_static) + len(M_mobile) < total_rsu_budget:
 
-        # best static RSU
         best_s = None
         best_s_gain = 0
         best_s_cover = set()
@@ -145,7 +134,7 @@ def hybrid_rsu_deployment(
             if v in S_static:
                 continue
 
-            cover = node_coverage(G, v, srsu_radius)
+            cover = node_coverage_kdtree(nodes, coords, tree, node_index[v], radius_s)
 
             gain = len(cover - coverage)
 
@@ -154,7 +143,6 @@ def hybrid_rsu_deployment(
                 best_s = v
                 best_s_cover = cover
 
-        # best mobile RSU
         best_m = None
         best_m_gain = 0
         best_m_cover = set()
@@ -164,7 +152,9 @@ def hybrid_rsu_deployment(
             if node in M_mobile:
                 continue
 
-            cover = node_coverage(G, node, mrsu_radius)
+            cover = node_coverage_kdtree(
+                nodes, coords, tree, node_index[node], radius_m
+            )
 
             gain = len(cover - coverage)
 
@@ -173,21 +163,22 @@ def hybrid_rsu_deployment(
                 best_m = node
                 best_m_cover = cover
 
-        # choose better
-        if best_s_gain >= best_m_gain:
+        static_ratio = len(S_static) / max(1, (len(S_static) + len(M_mobile)))
+        min_static_ratio = 0.3
+        if static_ratio < min_static_ratio:
+            choose_static = True
+        else:
+            choose_static = best_s_gain >= best_m_gain
 
-            if best_s is None:
-                break
-
+        if choose_static:
             S_static.append(best_s)
             coverage |= best_s_cover
-
         else:
-
-            if best_m is None:
-                break
-
             M_mobile.append(best_m)
             coverage |= best_m_cover
+
+    # safeguard
+    S_static = [n for n in S_static if n in G.nodes]
+    M_mobile = [n for n in M_mobile if n in G.nodes]
 
     return S_static, M_mobile
