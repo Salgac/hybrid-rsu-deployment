@@ -1,13 +1,98 @@
 import numpy as np
-from scipy.spatial import cKDTree
+import pandas as pd
+import networkx as nx
 
 
-# =========================================================
-# compute node traffic demand from weighted graph
-# =========================================================
+# ---------------------------------------------------------
+# distance helper
+# ---------------------------------------------------------
 
 
-def _compute_node_demand(G):
+def _distance_m(lat1, lon1, lat2, lon2):
+
+    meter_per_deg_lat = 111320
+    meter_per_deg_lon = 111320 * np.cos(np.radians((lat1 + lat2) / 2))
+
+    dx = (lon1 - lon2) * meter_per_deg_lon
+    dy = (lat1 - lat2) * meter_per_deg_lat
+
+    return np.sqrt(dx**2 + dy**2)
+
+
+# ---------------------------------------------------------
+# snap coordinate to nearest node
+# ---------------------------------------------------------
+
+
+def nearest_node(G, lat, lon):
+
+    best_node = None
+    best_dist = float("inf")
+
+    for node in G.nodes():
+
+        lat2 = G.nodes[node]["y"]
+        lon2 = G.nodes[node]["x"]
+
+        d = _distance_m(lat, lon, lat2, lon2)
+
+        if d < best_dist:
+            best_node = node
+            best_dist = d
+
+    return best_node
+
+
+# ---------------------------------------------------------
+# vehicle density on nodes
+# ---------------------------------------------------------
+
+
+def vehicle_node_density(G, vehicle_df):
+
+    visit_counts = {}
+
+    for _, row in vehicle_df.iterrows():
+
+        lat = row["Latitude"]
+        lon = row["Longitude"]
+
+        node = nearest_node(G, lat, lon)
+
+        visit_counts[node] = visit_counts.get(node, 0) + 1
+
+    return visit_counts
+
+
+# ---------------------------------------------------------
+# node coverage
+# ---------------------------------------------------------
+
+
+def node_coverage(G, node, radius):
+
+    lat = G.nodes[node]["y"]
+    lon = G.nodes[node]["x"]
+
+    covered = set()
+
+    for n in G.nodes():
+
+        lat2 = G.nodes[n]["y"]
+        lon2 = G.nodes[n]["x"]
+
+        if _distance_m(lat, lon, lat2, lon2) <= radius:
+            covered.add(n)
+
+    return covered
+
+
+# ---------------------------------------------------------
+# compute node demand from congestion
+# ---------------------------------------------------------
+
+
+def compute_node_demand(G):
 
     demand = {}
 
@@ -15,125 +100,94 @@ def _compute_node_demand(G):
 
         weights = [data.get("congestion", 0) for _, _, data in G.edges(node, data=True)]
 
-        demand[node] = np.mean(weights) if weights else 0
+        demand[node] = float(np.mean(weights)) if weights else 0
+
+    nx.set_node_attributes(G, demand, "demand")
 
     return demand
 
 
-# =========================================================
-# compute vehicle density using KD-tree
-# =========================================================
+# ---------------------------------------------------------
+# Hybrid RSU deployment (node-based)
+# ---------------------------------------------------------
 
 
-def _vehicle_density_kdtree(G, vehicles_df, radius_m):
-
-    nodes = list(G.nodes())
-
-    node_coords = np.array([(G.nodes[n]["y"], G.nodes[n]["x"]) for n in nodes])
-
-    vehicle_coords = vehicles_df[["Latitude", "Longitude"]].values
-
-    # convert to meters approximation
-    meter_per_deg = 111320
-
-    node_coords_m = node_coords * meter_per_deg
-    vehicle_coords_m = vehicle_coords * meter_per_deg
-
-    tree = cKDTree(vehicle_coords_m)
-
-    densities = {}
-
-    for i, node in enumerate(nodes):
-
-        neighbors = tree.query_ball_point(node_coords_m[i], radius_m)
-
-        densities[node] = len(neighbors)
-
-    return densities
-
-
-# =========================================================
-# greedy deployment using residual demand
-# =========================================================
-
-
-def deploy_hybrid_rsus(
-    G,
-    vehicles_df,
-    num_rsus,
-    coverage_radius_m=300,
+def hybrid_rsu_deployment(
+    G, vehicle_df, total_rsu_budget=20, srsu_radius=300, mrsu_radius=300, theta=0.2
 ):
 
-    nodes = list(G.nodes())
+    compute_node_demand(G)
 
-    # traffic demand
-    demand = _compute_node_demand(G)
+    # candidate static nodes
+    H = [n for n in G.nodes() if G.nodes[n]["demand"] >= theta]
 
-    # vehicle density
-    vehicle_density = _vehicle_density_kdtree(G, vehicles_df, coverage_radius_m)
+    # vehicle density hotspots
+    visit_counts = vehicle_node_density(G, vehicle_df)
 
-    max_vehicle = max(vehicle_density.values()) or 1
+    ranked_mobile_nodes = sorted(visit_counts.items(), key=lambda x: x[1], reverse=True)
 
-    # residual demand (where mobile RSUs are insufficient)
-    residual = {}
+    ranked_mobile_nodes = [n for n, _ in ranked_mobile_nodes]
 
-    for n in nodes:
+    S_static = []
+    M_mobile = []
 
-        mobile_cov = vehicle_density[n] / max_vehicle
+    coverage = set()
 
-        residual[n] = demand[n] * (1 - mobile_cov)
+    while len(S_static) + len(M_mobile) < total_rsu_budget:
 
-    # greedy selection
-    selected = []
-    uncovered = set(nodes)
+        # best static RSU
+        best_s = None
+        best_s_gain = 0
+        best_s_cover = set()
 
-    for _ in range(num_rsus):
+        for v in H:
 
-        best_node = None
-        best_gain = -1
-
-        for node in nodes:
-
-            if node in selected:
+            if v in S_static:
                 continue
 
-            gain = 0
+            cover = node_coverage(G, v, srsu_radius)
 
-            lat1 = G.nodes[node]["y"]
-            lon1 = G.nodes[node]["x"]
+            gain = len(cover - coverage)
 
-            for other in uncovered:
+            if gain > best_s_gain:
+                best_s_gain = gain
+                best_s = v
+                best_s_cover = cover
 
-                lat2 = G.nodes[other]["y"]
-                lon2 = G.nodes[other]["x"]
+        # best mobile RSU
+        best_m = None
+        best_m_gain = 0
+        best_m_cover = set()
 
-                dist = np.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2) * 111320
+        for node in ranked_mobile_nodes:
 
-                if dist <= coverage_radius_m:
-                    gain += residual[other]
+            if node in M_mobile:
+                continue
 
-            if gain > best_gain:
-                best_gain = gain
-                best_node = node
+            cover = node_coverage(G, node, mrsu_radius)
 
-        selected.append(best_node)
+            gain = len(cover - coverage)
 
-        # remove covered nodes
-        lat1 = G.nodes[best_node]["y"]
-        lon1 = G.nodes[best_node]["x"]
+            if gain > best_m_gain:
+                best_m_gain = gain
+                best_m = node
+                best_m_cover = cover
 
-        covered = set()
+        # choose better
+        if best_s_gain >= best_m_gain:
 
-        for other in uncovered:
+            if best_s is None:
+                break
 
-            lat2 = G.nodes[other]["y"]
-            lon2 = G.nodes[other]["x"]
+            S_static.append(best_s)
+            coverage |= best_s_cover
 
-            dist = np.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2) * 111320
+        else:
 
-            if dist <= coverage_radius_m:
-                covered.add(other)
+            if best_m is None:
+                break
 
-        uncovered -= covered
+            M_mobile.append(best_m)
+            coverage |= best_m_cover
 
-    return selected
+    return S_static, M_mobile
