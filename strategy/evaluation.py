@@ -361,7 +361,6 @@ def plot_combined_coverage(df, save_path=None):
         x="budget",
         y="traffic_coverage",
         hue="strategy",
-        marker="o",
         linewidth=2,
         ax=axes[0],
     )
@@ -384,7 +383,6 @@ def plot_combined_coverage(df, save_path=None):
         x="budget",
         y="graph_coverage",
         hue="strategy",
-        marker="o",
         linewidth=2,
         ax=axes[1],
         legend=False,
@@ -403,7 +401,7 @@ def plot_combined_coverage(df, save_path=None):
     # Legend
     # -----------------------------------------------------
 
-    axes[0].legend(title="Deployment Strategy", loc="lower right", frameon=True)
+    axes[1].legend(title="Deployment Strategy", loc="lower right", frameon=True)
 
     sns.despine()
 
