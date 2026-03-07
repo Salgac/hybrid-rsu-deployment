@@ -64,7 +64,9 @@ def visualize_hybrid_deployment(
     vehicle_radius=300,
 ):
 
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=14)
+    m = folium.Map(
+        location=[center_lat, center_lng], tiles="Cartodb Positron", zoom_start=14
+    )
 
     mobile_density = compute_mobile_density(G, vehicles_df, vehicle_radius)
 

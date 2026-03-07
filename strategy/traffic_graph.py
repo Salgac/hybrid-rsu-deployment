@@ -148,7 +148,9 @@ def visualize_weighted_graph(
     Visualize weighted graph using folium.
     """
 
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=zoom)
+    m = folium.Map(
+        location=[center_lat, center_lng], tiles="Cartodb Positron", zoom_start=zoom
+    )
 
     cmap = cm.get_cmap(colormap)
 
