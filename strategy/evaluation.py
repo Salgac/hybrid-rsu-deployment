@@ -401,7 +401,7 @@ def plot_combined_coverage(df, save_path=None):
     # Legend
     # -----------------------------------------------------
 
-    axes[1].legend(title="Deployment Strategy", loc="lower right", frameon=True)
+    axes[0].legend(title="Deployment Strategy", loc="lower right", frameon=True)
 
     sns.despine()
 
